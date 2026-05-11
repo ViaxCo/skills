@@ -1,6 +1,6 @@
 ---
 name: review-fix-loop
-description: "Use when the user wants an iterative review workflow: run a separate Codex reviewer, fix the important findings, rerun review, and stop when there are no important issues left or the loop reaches a sensible limit."
+description: "Use when the user wants an iterative review workflow: run a separate Codex reviewer, fix the important findings, rerun review, and stop when there are no important issues left or the loop is no longer converging cleanly."
 ---
 
 # Review Fix Loop
@@ -13,7 +13,7 @@ Use `codex exec review` as the review mechanism. Do not replace it with a local 
 
 - scope: `--uncommitted`
 - goal: continue until no `fix now` findings remain
-- max review passes: `8` as a runaway guardrail, not the target
+- convergence checkpoint: after `8` review passes, scrutinize each additional pass more carefully; do not stop solely because this checkpoint was reached
 - stop policy: pragmatic convergence
 - reviewer wait window: `15m`
 - poll interval: `30s`
@@ -22,7 +22,7 @@ Use `codex exec review` as the review mechanism. Do not replace it with a local 
 Before starting, briefly list unresolved questions:
 
 - scope: `--uncommitted`, `--base <branch>`, or `--commit <sha>`
-- max review passes: `8` by default, or another cap if this task needs one
+- convergence checkpoint: `8` review passes by default, or another checkpoint if this task needs one
 - stop policy: strict clean review vs pragmatic convergence
 - scope boundaries for this conversation, if unclear
 - reviewer wait window
@@ -53,19 +53,19 @@ If the user does not answer, continue with defaults.
    - the next fix would be disproportionately invasive
    - the next fix would expand beyond the conversation's scope
    - the same kind of finding repeats after a reasonable fix attempt
-   - the max review pass guardrail is reached
+   - the review loop is no longer making meaningful progress
 
 ## Guardrails
 
 - Default shape:
   - pass 1: review current changes
   - later passes: review after each fix batch until no `fix now` findings remain
-  - max passes: `8` by default, used only to prevent runaway loops
+  - convergence checkpoint: `8` review passes by default, used to increase scrutiny rather than to force a stop
 - Do not stop immediately after applying a fresh fix batch unless one of these is true:
   - a confirming review pass ran and produced a usable result
   - a real blocker prevented confirmation and you report that clearly
   - the user explicitly told you to stop without a confirmation pass
-- If the max pass guardrail is reached while `fix now` findings remain, stop and reassess instead of continuing automatically. Report that the patch is not converging cleanly.
+- If the convergence checkpoint is reached while `fix now` findings remain, continue automatically only when the remaining findings are important, in scope, and the loop is still making meaningful progress. Stop when the patch is not converging cleanly.
 - If new findings start touching behavior, ownership areas, files, or subsystems beyond what is needed for the current conversation's requested change, stop after the current batch and report `scope_expansion`. Examples: a dashboard task spilling into auth, routing, app init, payments, analytics, or shared providers.
 - If only skipped or out-of-scope findings remain, stop immediately after triage and report `no_fix_now_findings`.
 - Prefer follow-up work over endless loop churn. If the patch is growing materially, recommend splitting remaining fixes into a follow-up instead of continuing the same loop.
@@ -127,6 +127,6 @@ Report:
 - findings intentionally skipped or treated as out of scope, with brief reasons
 - validation performed
 - whether a real reviewer result was obtained on each pass
-- stop reason, for example: `clean_review`, `no_fix_now_findings`, `max_pass_guardrail`, `scope_expansion`, `reviewer_timeout`, `reviewer_nonzero_exit`, `missing_reviewer_message`, or `unconfirmed_final_batch`
+- stop reason, for example: `clean_review`, `no_fix_now_findings`, `not_converging`, `scope_expansion`, `reviewer_timeout`, `reviewer_nonzero_exit`, `missing_reviewer_message`, or `unconfirmed_final_batch`
 
 Keep the final report compact. Do not narrate every pass in detail unless the user asks for it; summarize the loop outcome and only call out details that affect confidence or next steps.
