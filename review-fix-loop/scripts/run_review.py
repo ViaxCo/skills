@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+DEFAULT_TIMEOUT_SECONDS = 900
+
 
 def run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -98,6 +100,10 @@ def load_jsonl(path: Path) -> list[dict]:
     return events
 
 
+def write_json(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
 def first_non_empty(values: list[str | None]) -> str | None:
     for value in values:
         if value and value.strip():
@@ -125,6 +131,12 @@ def extract_review_text(jsonl_path: Path, final_message_path: Path) -> tuple[str
         )
         if review_output:
             return "structured_review_output", review_output
+
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                return "item_agent_message", text.strip()
 
     if final_message_path.exists():
         final_message = final_message_path.read_text(encoding="utf-8").strip()
@@ -197,12 +209,6 @@ def main() -> int:
     parser.add_argument("--base", help="Base ref when --scope base is used")
     parser.add_argument("--commit", help="Commit ref when --scope commit is used")
     parser.add_argument(
-        "--timeout-seconds",
-        type=int,
-        default=900,
-        help="Reviewer wait window in seconds",
-    )
-    parser.add_argument(
         "--no-fallback",
         action="store_true",
         help="Disable backup codex review after terminal preferred-review failure",
@@ -212,6 +218,7 @@ def main() -> int:
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "summary.json"
 
     scope, scope_value = detect_scope(args)
     selected_scope_args = scope_args(scope, scope_value)
@@ -220,6 +227,28 @@ def main() -> int:
     preferred_stderr = output_dir / "preferred.stderr"
     preferred_message = output_dir / "preferred.last-message.txt"
     preferred_review = output_dir / "preferred.review.txt"
+
+    summary: dict[str, object] = {
+        "state": "running",
+        "scope": scope,
+        "scope_value": scope_value,
+        "timeout_seconds": DEFAULT_TIMEOUT_SECONDS,
+        "preferred": {
+            "command": None,
+            "stdout_path": str(preferred_stdout),
+            "stderr_path": str(preferred_stderr),
+            "final_message_path": str(preferred_message),
+            "review_text_path": None,
+            "exit_code": None,
+            "timed_out": False,
+            "usable": False,
+            "review_source": None,
+        },
+        "used_reviewer": "preferred",
+        "backup": None,
+        "review_text_path": None,
+        "stop_reason": None,
+    }
 
     preferred_command = [
         "codex",
@@ -232,12 +261,14 @@ def main() -> int:
     ]
     if args.title:
         preferred_command.extend(["--title", args.title])
+    summary["preferred"]["command"] = preferred_command
+    write_json(summary_path, summary)
 
     preferred_exit_code, preferred_timed_out = run_command(
         preferred_command,
         preferred_stdout,
         preferred_stderr,
-        args.timeout_seconds,
+        DEFAULT_TIMEOUT_SECONDS,
     )
 
     review_source = None
@@ -248,44 +279,32 @@ def main() -> int:
             write_text(preferred_review, review_text)
             preferred_usable = True
 
-    summary: dict[str, object] = {
-        "scope": scope,
-        "scope_value": scope_value,
-        "timeout_seconds": args.timeout_seconds,
-        "preferred": {
-            "command": preferred_command,
-            "stdout_path": str(preferred_stdout),
-            "stderr_path": str(preferred_stderr),
-            "final_message_path": str(preferred_message),
-            "review_text_path": str(preferred_review) if preferred_review.exists() else None,
-            "exit_code": preferred_exit_code,
-            "timed_out": preferred_timed_out,
-            "usable": preferred_usable,
-            "review_source": review_source,
-        },
-        "used_reviewer": "preferred",
-        "backup": None,
-    }
+    summary["preferred"]["review_text_path"] = str(preferred_review) if preferred_review.exists() else None
+    summary["preferred"]["exit_code"] = preferred_exit_code
+    summary["preferred"]["timed_out"] = preferred_timed_out
+    summary["preferred"]["usable"] = preferred_usable
+    summary["preferred"]["review_source"] = review_source
 
     if preferred_usable:
+        summary["state"] = "completed"
         summary["review_text_path"] = str(preferred_review)
         summary["stop_reason"] = "review_ok"
-        summary_path = output_dir / "summary.json"
-        write_text(summary_path, json.dumps(summary, indent=2) + "\n")
+        write_json(summary_path, summary)
         print(summary_path)
         return 0
 
     if args.no_fallback:
+        summary["state"] = "completed"
         summary["review_text_path"] = None
         summary["stop_reason"] = classify_failure(preferred_exit_code, preferred_timed_out)
-        summary_path = output_dir / "summary.json"
-        write_text(summary_path, json.dumps(summary, indent=2) + "\n")
+        write_json(summary_path, summary)
         print(summary_path)
         return 0
 
     backup_stdout = output_dir / "backup.stdout.txt"
     backup_stderr = output_dir / "backup.stderr"
     backup_review = output_dir / "backup.review.txt"
+    summary["state"] = "running_backup"
 
     backup_command = ["codex", "review", *selected_scope_args]
     if args.title:
@@ -295,7 +314,7 @@ def main() -> int:
         backup_command,
         backup_stdout,
         backup_stderr,
-        args.timeout_seconds,
+        DEFAULT_TIMEOUT_SECONDS,
     )
 
     backup_usable = False
@@ -317,15 +336,16 @@ def main() -> int:
         "review_source": "backup_stdout" if backup_usable else None,
     }
     if backup_usable:
+        summary["state"] = "completed"
         summary["review_text_path"] = str(backup_review)
         summary["stop_reason"] = "review_ok"
     else:
+        summary["state"] = "completed"
         summary["review_text_path"] = None
         summary["stop_reason"] = classify_failure(preferred_exit_code, preferred_timed_out)
         summary["backup_stop_reason"] = classify_failure(backup_exit_code, backup_timed_out)
 
-    summary_path = output_dir / "summary.json"
-    write_text(summary_path, json.dumps(summary, indent=2) + "\n")
+    write_json(summary_path, summary)
     print(summary_path)
     return 0
 

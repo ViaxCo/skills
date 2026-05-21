@@ -46,15 +46,16 @@ If the scope is materially ambiguous, surface that once. Otherwise, start the lo
 1. Choose the review scope.
 2. Run the reviewer with `python3 scripts/run_review.py --output-dir <dir>`.
 3. Wait patiently. Silence is not failure on its own.
-4. Read the structured summary from `run_review.py`.
-5. If the preferred reviewer ended in terminal failure and the helper used the backup reviewer, continue with the backup review result. If both reviewer paths failed, stop and report that clearly.
-6. Parse the authoritative review text with `python3 scripts/extract_review_output.py --summary <summary.json>`.
-7. Triage findings into:
+4. If the review command is still running, keep waiting on that process. Do not treat a missing or in-progress `summary.json` as reviewer failure.
+5. Read the structured summary from `run_review.py` only after the helper exits, or after the summary explicitly says the run is complete.
+6. If the preferred reviewer ended in terminal failure and the helper used the backup reviewer, continue with the backup review result. If both reviewer paths failed, stop and report that clearly.
+7. Parse the authoritative review text with `python3 scripts/extract_review_output.py --summary <summary.json>`.
+8. Triage findings into:
    - `fix now`: correctness, regressions, broken tests, missing critical error handling, security, data-loss risk, or other high-confidence issues in scope
    - `skip for now`: style-only, speculative, low-confidence, repeated low-value churn, out-of-scope findings, or fixes that require a broad refactor beyond scope
-8. Fix only `fix now` findings.
-9. Run the narrowest useful validation after each meaningful fix batch.
-10. Repeat until a stop condition is reached.
+9. Fix only `fix now` findings.
+10. Run the narrowest useful validation after each meaningful fix batch.
+11. Repeat until a stop condition is reached.
 
 ## Triage Rules
 
@@ -130,8 +131,9 @@ The helper:
 - chooses scope automatically by default
 - runs `codex exec review --json` first
 - falls back to `codex review` only after terminal reviewer failure
-- writes a structured summary JSON
+- writes `summary.json` immediately and updates it in place as the review progresses
 - writes the authoritative review text to a file path the summary reports
+- should be treated as authoritative about whether the review is still running or complete
 
 To inspect the authoritative review text:
 
@@ -139,7 +141,7 @@ To inspect the authoritative review text:
 python3 scripts/extract_review_output.py --summary "$tmp_dir/summary.json"
 ```
 
-Use `python3 scripts/run_review.py --help` for optional flags such as explicit scope, base ref, commit ref, timeout, and disabling fallback.
+Use `python3 scripts/run_review.py --help` for optional flags such as explicit scope, base ref, commit ref, and disabling fallback. Do not shorten the reviewer wait window ad hoc.
 
 ## Final Report
 

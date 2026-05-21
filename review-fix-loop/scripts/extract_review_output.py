@@ -29,10 +29,12 @@ def main() -> int:
     summary_path = Path(args.summary).expanduser().resolve()
     summary = load_json(summary_path)
     review_text_path = summary.get("review_text_path")
+    state = summary.get("state")
 
     if not isinstance(review_text_path, str) or not review_text_path:
         payload = {
             "usable": False,
+            "state": state,
             "used_reviewer": summary.get("used_reviewer"),
             "stop_reason": summary.get("stop_reason"),
             "review_text_path": None,
@@ -48,6 +50,7 @@ def main() -> int:
     review_text = review_path.read_text(encoding="utf-8")
     payload = {
         "usable": True,
+        "state": state,
         "used_reviewer": summary.get("used_reviewer"),
         "stop_reason": summary.get("stop_reason"),
         "review_text_path": str(review_path),
