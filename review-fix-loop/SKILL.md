@@ -1,6 +1,6 @@
 ---
 name: review-fix-loop
-description: Run a local-first Codex review closeout loop: choose the right diff, use a separate Codex reviewer, fix important in-scope findings, validate narrowly, and rerun review until the patch is ready to close out or no longer converging cleanly. Use when the user wants an iterative Codex review/fix/review workflow for uncommitted work, branch diffs, or committed changes before finishing, committing, or shipping.
+description: "Run a local-first Codex review closeout loop: choose the right diff, use a separate Codex reviewer, fix important in-scope findings, validate narrowly, and rerun review until the patch is ready to close out or no longer converging cleanly. Use when the user wants an iterative Codex review/fix/review workflow for uncommitted work, branch diffs, or committed changes before finishing, committing, or shipping."
 ---
 
 # Review Fix Loop
