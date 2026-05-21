@@ -1,132 +1,157 @@
 ---
 name: review-fix-loop
-description: "Use when the user wants an iterative review workflow: run a separate Codex reviewer, fix the important findings, rerun review, and stop when there are no important issues left or the loop is no longer converging cleanly."
+description: Run a local-first Codex review closeout loop: choose the right diff, use a separate Codex reviewer, fix important in-scope findings, validate narrowly, and rerun review until the patch is ready to close out or no longer converging cleanly. Use when the user wants an iterative Codex review/fix/review workflow for uncommitted work, branch diffs, or committed changes before finishing, committing, or shipping.
 ---
 
 # Review Fix Loop
 
-Use this skill for a real review -> fix -> real review loop with a separate Codex reviewer.
+Use this skill to run a real review -> fix -> review closeout loop.
 
-Use `codex exec review` as the review mechanism. Do not replace it with a local self-review. Do not modify this skill or its scripts during a run unless the user explicitly asks.
+Prefer uncommitted local work first, but choose branch or commit review when the actual work state requires it.
+
+## Contract
+
+- Use a real separate reviewer run. Do not replace reviewer failure with self-review.
+- Prefer `codex exec review --json` as the reviewer engine.
+- Allow `codex review` only as a declared backup reviewer after terminal reviewer failure.
+- Treat temporary silence during review as normal.
+- Continue until no `fix now` findings remain, or the loop is no longer converging usefully.
+- Reject speculative, noisy, low-confidence, or overly invasive findings.
+- Prefer small fixes at the correct ownership boundary.
+- Run focused proof after meaningful fix batches.
+- Stay silent by default. Surface assumptions or blockers only when they materially affect trust, scope, or safety.
 
 ## Defaults
 
-- scope: `--uncommitted`
-- goal: continue until no `fix now` findings remain
-- convergence checkpoint: after `8` review passes, scrutinize each additional pass more carefully; do not stop solely because this checkpoint was reached
-- stop policy: pragmatic convergence
-- reviewer wait window: `15m`
-- poll interval: `30s`
-- validation: run the narrowest useful checks after each fix set when practical
+- Default scope: local uncommitted changes
+- Default reviewer wait window: `15m`
+- Soft convergence checkpoint: `8` passes
+- Validation style: focused-first with conservative auto-detection
+- Subagents: optional, only when they clearly reduce review noise or context load
 
-Before starting, briefly list unresolved questions:
+## Scope Policy
 
-- scope: `--uncommitted`, `--base <branch>`, or `--commit <sha>`
-- convergence checkpoint: `8` review passes by default, or another checkpoint if this task needs one
-- stop policy: strict clean review vs pragmatic convergence
-- scope boundaries for this conversation, if unclear
-- reviewer wait window
-- validation command, if any
+Choose the real work state instead of forcing one mode:
 
-If the user does not answer, continue with defaults.
+- dirty local work: `--uncommitted`
+- branch or PR work: `--base <base>`
+- committed single change: `--commit <sha>`
+
+Use [scripts/run_review.py](./scripts/run_review.py) for default scope auto-selection and reviewer execution.
+
+If the scope is materially ambiguous, surface that once. Otherwise, start the loop and report at the end.
 
 ## Loop
 
-1. State assumptions.
-2. Run a separate reviewer with `codex exec review --json`.
-3. Wait patiently. Review runs can take several minutes. Poll for progress every `20-30s` instead of treating a short delay as failure.
-4. Parse the reviewer result with [scripts/extract_review_output.py](scripts/extract_review_output.py).
-   Accept either:
-   - structured `exited_review_mode.review_output`
-   - the final review `agent_message` text from `codex exec review --json`
-5. If the reviewer times out, exits nonzero, or produces no final review message, stop and report that the real reviewer did not produce a usable result. Do not substitute a local review.
-6. If there are no findings, stop.
-7. Triage findings:
-   - `fix now`: correctness, regressions, broken tests, missing error handling, security, data-loss, or high-confidence issues
-   - `skip for now`: style-only, speculative, low-confidence, repeated low-value churn, out-of-scope findings, or fixes requiring a broad refactor beyond scope
+1. Choose the review scope.
+2. Run the reviewer with `python3 scripts/run_review.py --output-dir <dir>`.
+3. Wait patiently. Silence is not failure on its own.
+4. Read the structured summary from `run_review.py`.
+5. If the preferred reviewer ended in terminal failure and the helper used the backup reviewer, continue with the backup review result. If both reviewer paths failed, stop and report that clearly.
+6. Parse the authoritative review text with `python3 scripts/extract_review_output.py --summary <summary.json>`.
+7. Triage findings into:
+   - `fix now`: correctness, regressions, broken tests, missing critical error handling, security, data-loss risk, or other high-confidence issues in scope
+   - `skip for now`: style-only, speculative, low-confidence, repeated low-value churn, out-of-scope findings, or fixes that require a broad refactor beyond scope
 8. Fix only `fix now` findings.
-9. Run narrow validation if practical.
-10. Repeat.
-11. Stop when any of these is true:
-   - no findings remain
-   - no `fix now` findings remain
-   - the next fix would be disproportionately invasive
-   - the next fix would expand beyond the conversation's scope
-   - the same kind of finding repeats after a reasonable fix attempt
-   - the review loop is no longer making meaningful progress
+9. Run the narrowest useful validation after each meaningful fix batch.
+10. Repeat until a stop condition is reached.
 
-## Guardrails
+## Triage Rules
 
-- Default shape:
-  - pass 1: review current changes
-  - later passes: review after each fix batch until no `fix now` findings remain
-  - convergence checkpoint: `8` review passes by default, used to increase scrutiny rather than to force a stop
-- Do not stop immediately after applying a fresh fix batch unless one of these is true:
-  - a confirming review pass ran and produced a usable result
-  - a real blocker prevented confirmation and you report that clearly
-  - the user explicitly told you to stop without a confirmation pass
-- If the convergence checkpoint is reached while `fix now` findings remain, continue automatically only when the remaining findings are important, in scope, and the loop is still making meaningful progress. Stop when the patch is not converging cleanly.
-- If new findings start touching behavior, ownership areas, files, or subsystems beyond what is needed for the current conversation's requested change, stop after the current batch and report `scope_expansion`. Examples: a dashboard task spilling into auth, routing, app init, payments, analytics, or shared providers.
-- If only skipped or out-of-scope findings remain, stop immediately after triage and report `no_fix_now_findings`.
-- Prefer follow-up work over endless loop churn. If the patch is growing materially, recommend splitting remaining fixes into a follow-up instead of continuing the same loop.
-- When findings involve auth, routing, app init, mode persistence, or financial calculations, run targeted scenario validation before deciding to stop. Do not rely on review alone when those flows are in play.
+Treat these as strong reasons to skip a finding unless context clearly raises the risk:
 
-Prefer small fix batches between review passes.
+- unrealistic edge cases
+- speculative risks
+- broad rewrites
+- low-confidence churn
+- fixes that cross the ownership boundary without solving the current bug class
 
-## Review Command
+Prefer follow-up work over swelling the current patch.
 
-Preferred command:
+If only skipped or out-of-scope findings remain after triage, stop with `no_fix_now_findings`.
+
+## Convergence Rules
+
+Use the `8`-pass checkpoint as a reassessment marker, not a hard cap.
+
+Continue beyond the checkpoint only when the remaining findings are important, in scope, and the loop is still making meaningful progress.
+
+Stop when any of these is true:
+
+- `clean_review`
+- `no_fix_now_findings`
+- `not_converging`
+- `scope_expansion`
+- `reviewer_timeout`
+- `reviewer_nonzero_exit`
+- `missing_reviewer_output`
+- `unconfirmed_final_batch`
+
+If new findings start pulling unrelated subsystems into the patch, stop after the current batch and report `scope_expansion`.
+
+Do not stop right after a fresh fix batch unless:
+
+- a confirming review pass completed with usable output
+- a real blocker prevented confirmation and you report it clearly
+- the user explicitly told you to stop without another confirming review
+
+## Validation
+
+Prefer narrow proof tied to the fix.
+
+Use conservative auto-detection when an obvious focused check exists. If no clear validation path exists, say so plainly in the final report instead of inventing broad or speculative checks.
+
+Do not default to broad project checks unless they are clearly cheap, relevant, and unlikely to distract from the loop.
+
+When findings touch auth, routing, app init, persistence, or financial calculations, run targeted scenario validation before deciding to stop.
+
+## Optional Subagent
+
+Use a subagent only when it clearly reduces noise or context load.
+
+A subagent may:
+
+- run the reviewer
+- compress noisy review output into accepted findings, rejected findings, and validation targets
+
+Do not require subagents for the loop to work.
+
+## Helper
+
+Run the helper like this:
 
 ```bash
-tmp_jsonl=$(mktemp)
-tmp_review=$(mktemp)
-tmp_stderr=$(mktemp)
-codex exec review --json --output-last-message "$tmp_review" --uncommitted > "$tmp_jsonl" 2> "$tmp_stderr"
+tmp_dir=$(mktemp -d)
+python3 scripts/run_review.py --output-dir "$tmp_dir"
 ```
 
-Other scopes:
+The helper:
 
-- `codex exec review --json --output-last-message "$tmp_review" --base main > "$tmp_jsonl" 2> "$tmp_stderr"`
-- `codex exec review --json --output-last-message "$tmp_review" --commit <sha> > "$tmp_jsonl" 2> "$tmp_stderr"`
+- chooses scope automatically by default
+- runs `codex exec review --json` first
+- falls back to `codex review` only after terminal reviewer failure
+- writes a structured summary JSON
+- writes the authoritative review text to a file path the summary reports
 
-Capture stderr separately so unrelated CLI diagnostics, plugin warnings, analytics failures, or HTML challenge pages do not obscure the review loop. If the reviewer exits nonzero, times out, or produces no final review message, inspect and summarize `tmp_stderr` as part of the failure report. Do not treat stderr output alone as review findings when the reviewer succeeds and produces a usable final message.
-
-Do not rely on stdin prompt form with `--uncommitted`; it can conflict with the CLI argument parsing. Prefer the plain review command above.
-
-Do not add a custom local-review rubric. The purpose of this skill is to use the real review flow, with its built-in review behavior, as the source of findings.
-
-Use this timing policy by default:
-
-- allow up to `15m`
-- poll every `30s`
-- stop early only on explicit command failure
-
-If the command finishes without a final reviewer message, treat that as reviewer failure and stop. Do not reinterpret that as a clean review.
-
-## Parsing
-
-Example:
+To inspect the authoritative review text:
 
 ```bash
-tmp_jsonl=$(mktemp)
-tmp_review=$(mktemp)
-tmp_stderr=$(mktemp)
-codex exec review --json --output-last-message "$tmp_review" --uncommitted > "$tmp_jsonl" 2> "$tmp_stderr"
-python3 scripts/extract_review_output.py "$tmp_jsonl"
+python3 scripts/extract_review_output.py --summary "$tmp_dir/summary.json"
 ```
 
-The parser accepts either structured `ExitedReviewMode.review_output` or the final `agent_message` text from the real reviewer. If the source is `agent_message`, use the review text itself as the authoritative result and extract findings from that text. Do not treat the absence of machine-parsed findings as a clean review unless the reviewer explicitly says there are no issues.
+Use `python3 scripts/run_review.py --help` for optional flags such as explicit scope, base ref, commit ref, timeout, and disabling fallback.
 
 ## Final Report
 
-Report:
+Keep the final report compact. Include:
 
+- scope used
+- reviewer path used
 - passes run
-- whether the final fix batch received a confirming review pass
 - findings fixed
-- findings intentionally skipped or treated as out of scope, with brief reasons
-- validation performed
-- whether a real reviewer result was obtained on each pass
-- stop reason, for example: `clean_review`, `no_fix_now_findings`, `not_converging`, `scope_expansion`, `reviewer_timeout`, `reviewer_nonzero_exit`, `missing_reviewer_message`, or `unconfirmed_final_batch`
+- findings skipped, briefly why
+- validation run
+- final stop reason
+- whether the final fix batch received a confirming review pass
 
-Keep the final report compact. Do not narrate every pass in detail unless the user asks for it; summarize the loop outcome and only call out details that affect confidence or next steps.
+Do not narrate every pass unless the user asks.

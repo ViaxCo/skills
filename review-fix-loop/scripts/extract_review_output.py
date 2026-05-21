@@ -1,89 +1,65 @@
 #!/usr/bin/env python3
+
+import argparse
 import json
-import sys
 from pathlib import Path
 
 
-def iter_events(text: str):
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            yield json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-
-def extract_review_output(events):
-    last_agent_message = None
-    for event in events:
-        candidates = []
-        for key in ("msg", "item", "payload"):
-            value = event.get(key)
-            if isinstance(value, dict):
-                candidates.append(value)
-        candidates.append(event)
-
-        for msg in candidates:
-            if not isinstance(msg, dict):
-                continue
-
-            event_type = msg.get("type")
-            if event_type == "exited_review_mode":
-                review_output = msg.get("review_output")
-                if isinstance(review_output, dict):
-                    return {
-                        "source": "exited_review_mode",
-                        "review_output": review_output,
-                    }
-
-            if event_type == "agent_message":
-                text = msg.get("message") or msg.get("text")
-                if isinstance(text, str) and text.strip():
-                    last_agent_message = text
-
-            if event_type in {"turn_complete", "turn.completed"}:
-                text = msg.get("last_agent_message")
-                if isinstance(text, str) and text.strip():
-                    last_agent_message = text
-
-    if last_agent_message:
-        return {
-            "source": "agent_message",
-            "review_output": {
-                "overall_explanation": last_agent_message,
-            },
-        }
-
-    return None
+def load_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def main() -> int:
-    if len(sys.argv) > 2:
-        print("usage: extract_review_output.py [jsonl_file]", file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser(
+        description="Extract the authoritative review text from a review-fix-loop summary."
+    )
+    parser.add_argument("--summary", required=True, help="Path to summary.json from run_review.py")
+    parser.add_argument(
+        "--print-path",
+        action="store_true",
+        help="Print only the authoritative review text path",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print structured metadata as JSON instead of raw review text",
+    )
+    args = parser.parse_args()
 
-    if len(sys.argv) == 2:
-        text = Path(sys.argv[1]).read_text(encoding="utf-8")
-    else:
-        text = sys.stdin.read()
+    summary_path = Path(args.summary).expanduser().resolve()
+    summary = load_json(summary_path)
+    review_text_path = summary.get("review_text_path")
 
-    result = extract_review_output(iter_events(text))
-    if result is None:
-        print(
-            json.dumps(
-                {
-                    "source": "missing_structured_review_output",
-                    "error": "No final reviewer message found.",
-                },
-                indent=2,
-            )
-        )
+    if not isinstance(review_text_path, str) or not review_text_path:
+        payload = {
+            "usable": False,
+            "used_reviewer": summary.get("used_reviewer"),
+            "stop_reason": summary.get("stop_reason"),
+            "review_text_path": None,
+            "review_text": None,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        elif args.print_path:
+            print("")
         return 1
 
-    json.dump(result, sys.stdout, indent=2)
-    sys.stdout.write("\n")
+    review_path = Path(review_text_path)
+    review_text = review_path.read_text(encoding="utf-8")
+    payload = {
+        "usable": True,
+        "used_reviewer": summary.get("used_reviewer"),
+        "stop_reason": summary.get("stop_reason"),
+        "review_text_path": str(review_path),
+        "review_text": review_text,
+    }
+
+    if args.print_path:
+        print(review_path)
+    elif args.json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(review_text, end="")
     return 0
 
 
